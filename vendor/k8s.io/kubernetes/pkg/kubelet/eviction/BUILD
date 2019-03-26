@@ -20,7 +20,6 @@ go_test(
         "//pkg/kubelet/eviction/api:go_default_library",
         "//pkg/kubelet/lifecycle:go_default_library",
         "//pkg/kubelet/types:go_default_library",
-        "//pkg/quota:go_default_library",
         "//vendor/k8s.io/api/core/v1:go_default_library",
         "//vendor/k8s.io/apimachinery/pkg/api/resource:go_default_library",
         "//vendor/k8s.io/apimachinery/pkg/apis/meta/v1:go_default_library",
@@ -94,7 +93,6 @@ go_library(
         "//vendor/k8s.io/apimachinery/pkg/api/resource:go_default_library",
         "//vendor/k8s.io/apimachinery/pkg/apis/meta/v1:go_default_library",
         "//vendor/k8s.io/apimachinery/pkg/util/clock:go_default_library",
-        "//vendor/k8s.io/apimachinery/pkg/util/wait:go_default_library",
         "//vendor/k8s.io/apiserver/pkg/util/feature:go_default_library",
         "//vendor/k8s.io/client-go/tools/record:go_default_library",
     ] + select({

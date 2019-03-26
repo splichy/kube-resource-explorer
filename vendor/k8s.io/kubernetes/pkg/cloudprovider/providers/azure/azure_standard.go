@@ -28,8 +28,8 @@ import (
 	"k8s.io/api/core/v1"
 	"k8s.io/kubernetes/pkg/cloudprovider"
 
-	"github.com/Azure/azure-sdk-for-go/arm/compute"
-	"github.com/Azure/azure-sdk-for-go/arm/network"
+	"github.com/Azure/azure-sdk-for-go/services/compute/mgmt/2017-12-01/compute"
+	"github.com/Azure/azure-sdk-for-go/services/network/mgmt/2017-09-01/network"
 	"github.com/Azure/go-autorest/autorest/to"
 	"github.com/golang/glog"
 	"k8s.io/apimachinery/pkg/types"
@@ -59,6 +59,7 @@ const (
 
 var errNotInVMSet = errors.New("vm is not in the vmset")
 var providerIDRE = regexp.MustCompile(`^` + CloudProviderName + `://(?:.*)/Microsoft.Compute/virtualMachines/(.+)$`)
+var backendPoolIDRE = regexp.MustCompile(`^/subscriptions/(?:.*)/resourceGroups/(?:.*)/providers/Microsoft.Network/loadBalancers/(.+)/backendAddressPools/(?:.*)`)
 
 // getStandardMachineID returns the full identifier of a virtual machine.
 func (az *Cloud) getStandardMachineID(machineName string) string {
@@ -123,7 +124,7 @@ func (az *Cloud) mapLoadBalancerNameToVMSet(lbName string, clusterName string) (
 // This would be the name for Azure LoadBalancer resource.
 func (az *Cloud) getLoadBalancerName(clusterName string, vmSetName string, isInternal bool) string {
 	lbNamePrefix := vmSetName
-	if strings.EqualFold(vmSetName, az.vmSet.GetPrimaryVMSetName()) {
+	if strings.EqualFold(vmSetName, az.vmSet.GetPrimaryVMSetName()) || az.useStandardLoadBalancer() {
 		lbNamePrefix = clusterName
 	}
 	if isInternal {
@@ -366,6 +367,9 @@ func (as *availabilitySet) GetInstanceIDByNodeName(name string) (string, error) 
 	var err error
 
 	machine, err = as.getVirtualMachine(types.NodeName(name))
+	if err == cloudprovider.InstanceNotFound {
+		return "", cloudprovider.InstanceNotFound
+	}
 	if err != nil {
 		if as.CloudProviderBackoff {
 			glog.V(2).Infof("InstanceID(%s) backing off", name)
@@ -569,8 +573,9 @@ func (as *availabilitySet) GetPrimaryInterface(nodeName, vmSetName string) (netw
 		return network.Interface{}, err
 	}
 
-	// Check availability set
-	if vmSetName != "" {
+	// Check availability set.
+	// Backends of Standard load balancer could belong to multiple VMAS, so we don't check vmSet for it.
+	if vmSetName != "" && !as.useStandardLoadBalancer() {
 		expectedAvailabilitySetName := as.getAvailabilitySetID(vmSetName)
 		if machine.AvailabilitySet == nil || !strings.EqualFold(*machine.AvailabilitySet.ID, expectedAvailabilitySetName) {
 			glog.V(3).Infof(
@@ -579,7 +584,9 @@ func (as *availabilitySet) GetPrimaryInterface(nodeName, vmSetName string) (netw
 		}
 	}
 
-	nic, err := as.InterfacesClient.Get(as.ResourceGroup, nicName, "")
+	ctx, cancel := getContextWithCancel()
+	defer cancel()
+	nic, err := as.InterfacesClient.Get(ctx, as.ResourceGroup, nicName, "")
 	if err != nil {
 		return network.Interface{}, err
 	}
@@ -589,7 +596,7 @@ func (as *availabilitySet) GetPrimaryInterface(nodeName, vmSetName string) (netw
 
 // ensureHostInPool ensures the given VM's Primary NIC's Primary IP Configuration is
 // participating in the specified LoadBalancer Backend Pool.
-func (as *availabilitySet) ensureHostInPool(serviceName string, nodeName types.NodeName, backendPoolID string, vmSetName string) error {
+func (as *availabilitySet) ensureHostInPool(serviceName string, nodeName types.NodeName, backendPoolID string, vmSetName string, isInternal bool) error {
 	vmName := mapNodeNameToVMName(nodeName)
 	nic, err := as.GetPrimaryInterface(vmName, vmSetName)
 	if err != nil {
@@ -620,6 +627,24 @@ func (as *availabilitySet) ensureHostInPool(serviceName string, nodeName types.N
 		}
 	}
 	if !foundPool {
+		if as.useStandardLoadBalancer() && len(newBackendPools) > 0 {
+			// Although standard load balancer supports backends from multiple availability
+			// sets, the same network interface couldn't be added to more than one load balancer of
+			// the same type. Omit those nodes (e.g. masters) so Azure ARM won't complain
+			// about this.
+			for _, pool := range newBackendPools {
+				backendPool := *pool.ID
+				matches := backendPoolIDRE.FindStringSubmatch(backendPool)
+				if len(matches) == 2 {
+					lbName := matches[1]
+					if strings.HasSuffix(lbName, InternalLoadBalancerNameSuffix) == isInternal {
+						glog.V(4).Infof("Node %q has already been added to LB %q, omit adding it to a new one", nodeName, lbName)
+						return nil
+					}
+				}
+			}
+		}
+
 		newBackendPools = append(newBackendPools,
 			network.BackendAddressPool{
 				ID: to.StringPtr(backendPoolID),
@@ -629,11 +654,11 @@ func (as *availabilitySet) ensureHostInPool(serviceName string, nodeName types.N
 
 		nicName := *nic.Name
 		glog.V(3).Infof("nicupdate(%s): nic(%s) - updating", serviceName, nicName)
-		respChan, errChan := as.InterfacesClient.CreateOrUpdate(as.ResourceGroup, *nic.Name, nic, nil)
-		resp := <-respChan
-		err := <-errChan
+		ctx, cancel := getContextWithCancel()
+		defer cancel()
+		resp, err := as.InterfacesClient.CreateOrUpdate(ctx, as.ResourceGroup, *nic.Name, nic)
 		glog.V(10).Infof("InterfacesClient.CreateOrUpdate(%q): end", *nic.Name)
-		if as.CloudProviderBackoff && shouldRetryAPIRequest(resp.Response, err) {
+		if as.CloudProviderBackoff && shouldRetryHTTPRequest(resp, err) {
 			glog.V(2).Infof("nicupdate(%s) backing off: nic(%s) - updating, err=%v", serviceName, nicName, err)
 			retryErr := as.CreateOrUpdateInterfaceWithRetry(nic)
 			if retryErr != nil {
@@ -650,18 +675,23 @@ func (as *availabilitySet) ensureHostInPool(serviceName string, nodeName types.N
 
 // EnsureHostsInPool ensures the given Node's primary IP configurations are
 // participating in the specified LoadBalancer Backend Pool.
-func (as *availabilitySet) EnsureHostsInPool(serviceName string, nodes []*v1.Node, backendPoolID string, vmSetName string) error {
-	hostUpdates := make([]func() error, len(nodes))
-	for i, node := range nodes {
+func (as *availabilitySet) EnsureHostsInPool(serviceName string, nodes []*v1.Node, backendPoolID string, vmSetName string, isInternal bool) error {
+	hostUpdates := make([]func() error, 0, len(nodes))
+	for _, node := range nodes {
 		localNodeName := node.Name
+		if as.useStandardLoadBalancer() && as.excludeMasterNodesFromStandardLB() && isMasterNode(node) {
+			glog.V(4).Infof("Excluding master node %q from load balancer backendpool %q", localNodeName, backendPoolID)
+			continue
+		}
+
 		f := func() error {
-			err := as.ensureHostInPool(serviceName, types.NodeName(localNodeName), backendPoolID, vmSetName)
+			err := as.ensureHostInPool(serviceName, types.NodeName(localNodeName), backendPoolID, vmSetName, isInternal)
 			if err != nil {
 				return fmt.Errorf("ensure(%s): backendPoolID(%s) - failed to ensure host in pool: %q", serviceName, backendPoolID, err)
 			}
 			return nil
 		}
-		hostUpdates[i] = f
+		hostUpdates = append(hostUpdates, f)
 	}
 
 	errs := utilerrors.AggregateGoroutines(hostUpdates...)
@@ -673,7 +703,7 @@ func (as *availabilitySet) EnsureHostsInPool(serviceName string, nodes []*v1.Nod
 }
 
 // EnsureBackendPoolDeleted ensures the loadBalancer backendAddressPools deleted from the specified vmSet.
-func (as *availabilitySet) EnsureBackendPoolDeleted(poolID, vmSetName string) error {
+func (as *availabilitySet) EnsureBackendPoolDeleted(poolID, vmSetName string, backendAddressPools *[]network.BackendAddressPool) error {
 	// Do nothing for availability set.
 	return nil
 }

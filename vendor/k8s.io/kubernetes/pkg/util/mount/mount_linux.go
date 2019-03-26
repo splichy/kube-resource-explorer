@@ -54,7 +54,9 @@ const (
 	// place for subpath mounts
 	containerSubPathDirectoryName = "volume-subpaths"
 	// syscall.Openat flags used to traverse directories not following symlinks
-	nofollowFlags = syscall.O_RDONLY | syscall.O_NOFOLLOW
+	nofollowFlags = unix.O_RDONLY | unix.O_NOFOLLOW
+	// flags for getting file descriptor without following the symlink
+	openFDFlags = unix.O_NOFOLLOW | unix.O_PATH
 )
 
 // Mounter provides the default implementation of mount.Interface
@@ -421,31 +423,7 @@ func (mounter *Mounter) MakeRShared(path string) error {
 }
 
 func (mounter *Mounter) GetFileType(pathname string) (FileType, error) {
-	var pathType FileType
-	finfo, err := os.Stat(pathname)
-	if os.IsNotExist(err) {
-		return pathType, fmt.Errorf("path %q does not exist", pathname)
-	}
-	// err in call to os.Stat
-	if err != nil {
-		return pathType, err
-	}
-
-	mode := finfo.Sys().(*syscall.Stat_t).Mode
-	switch mode & syscall.S_IFMT {
-	case syscall.S_IFSOCK:
-		return FileTypeSocket, nil
-	case syscall.S_IFBLK:
-		return FileTypeBlockDev, nil
-	case syscall.S_IFCHR:
-		return FileTypeCharDev, nil
-	case syscall.S_IFDIR:
-		return FileTypeDirectory, nil
-	case syscall.S_IFREG:
-		return FileTypeFile, nil
-	}
-
-	return pathType, fmt.Errorf("only recognise file, directory, socket, block device and character device")
+	return getFileType(pathname)
 }
 
 func (mounter *Mounter) MakeDir(pathname string) error {
@@ -799,8 +777,13 @@ func doBindSubPath(mounter Interface, subpath Subpath, kubeletPid int) (hostPath
 	mountSource := fmt.Sprintf("/proc/%d/fd/%v", kubeletPid, fd)
 
 	// Do the bind mount
+	options := []string{"bind"}
+	if subpath.ReadOnly {
+		options = append(options, "ro")
+	}
+
 	glog.V(5).Infof("bind mounting %q at %q", mountSource, bindPathTarget)
-	if err = mounter.Mount(mountSource, bindPathTarget, "" /*fstype*/, []string{"bind"}); err != nil {
+	if err = mounter.Mount(mountSource, bindPathTarget, "" /*fstype*/, options); err != nil {
 		return "", fmt.Errorf("error mounting %s: %s", subpath.Path, err)
 	}
 
@@ -943,6 +926,31 @@ func (mounter *Mounter) SafeMakeDir(pathname string, base string, perm os.FileMo
 	return doSafeMakeDir(pathname, base, perm)
 }
 
+func (mounter *Mounter) GetMountRefs(pathname string) ([]string, error) {
+	realpath, err := filepath.EvalSymlinks(pathname)
+	if err != nil {
+		return nil, err
+	}
+	return getMountRefsByDev(mounter, realpath)
+}
+
+func (mounter *Mounter) GetFSGroup(pathname string) (int64, error) {
+	realpath, err := filepath.EvalSymlinks(pathname)
+	if err != nil {
+		return 0, err
+	}
+	return getFSGroup(realpath)
+}
+
+// This implementation is shared between Linux and NsEnterMounter
+func getFSGroup(pathname string) (int64, error) {
+	info, err := os.Stat(pathname)
+	if err != nil {
+		return 0, err
+	}
+	return int64(info.Sys().(*syscall.Stat_t).Gid), nil
+}
+
 // This implementation is shared between Linux and NsEnterMounter
 func doSafeMakeDir(pathname string, base string, perm os.FileMode) error {
 	glog.V(4).Infof("Creating directory %q within base %q", pathname, base)
@@ -1074,7 +1082,9 @@ func findExistingPrefix(base, pathname string) (string, []string, error) {
 		}
 	}()
 	for i, dir := range dirs {
-		childFD, err := syscall.Openat(fd, dir, syscall.O_RDONLY, 0)
+		// Using O_PATH here will prevent hangs in case user replaces directory with
+		// fifo
+		childFD, err := syscall.Openat(fd, dir, unix.O_PATH, 0)
 		if err != nil {
 			if os.IsNotExist(err) {
 				return currentPath, dirs[i:], nil
@@ -1136,9 +1146,19 @@ func doSafeOpen(pathname string, base string) (int, error) {
 		}
 
 		glog.V(5).Infof("Opening path %s", currentPath)
-		childFD, err = syscall.Openat(parentFD, seg, nofollowFlags, 0)
+		childFD, err = syscall.Openat(parentFD, seg, openFDFlags, 0)
 		if err != nil {
 			return -1, fmt.Errorf("cannot open %s: %s", currentPath, err)
+		}
+
+		var deviceStat unix.Stat_t
+		err := unix.Fstat(childFD, &deviceStat)
+		if err != nil {
+			return -1, fmt.Errorf("Error running fstat on %s with %v", currentPath, err)
+		}
+		fileFmt := deviceStat.Mode & syscall.S_IFMT
+		if fileFmt == syscall.S_IFLNK {
+			return -1, fmt.Errorf("Unexpected symlink found %s", currentPath)
 		}
 
 		// Close parentFD

@@ -21,13 +21,16 @@ package mount
 import (
 	"fmt"
 	"io/ioutil"
+	"net"
 	"os"
 	"path/filepath"
 	"reflect"
+	"strconv"
+	"strings"
 	"syscall"
 	"testing"
 
-	"strconv"
+	"k8s.io/utils/exec"
 
 	"github.com/golang/glog"
 )
@@ -200,7 +203,7 @@ func TestGetMountRefsByDev(t *testing.T) {
 
 	for i, test := range tests {
 
-		if refs, err := GetMountRefsByDev(fm, test.mountPath); err != nil || !setEquivalent(test.expectedRefs, refs) {
+		if refs, err := getMountRefsByDev(fm, test.mountPath); err != nil || !setEquivalent(test.expectedRefs, refs) {
 			t.Errorf("%d. getMountRefsByDev(%q) = %v, %v; expected %v, nil", i, test.mountPath, refs, err, test.expectedRefs)
 		}
 	}
@@ -1006,6 +1009,7 @@ func getTestPaths(base string) (string, string) {
 
 func TestBindSubPath(t *testing.T) {
 	defaultPerm := os.FileMode(0750)
+	readOnlyPerm := os.FileMode(0444)
 
 	tests := []struct {
 		name string
@@ -1013,6 +1017,7 @@ func TestBindSubPath(t *testing.T) {
 		// base.
 		prepare     func(base string) ([]string, string, string, error)
 		expectError bool
+		readOnly    bool
 	}{
 		{
 			name: "subpath-dir",
@@ -1179,6 +1184,93 @@ func TestBindSubPath(t *testing.T) {
 			},
 			expectError: false,
 		},
+		{
+			name: "mount-unix-socket",
+			prepare: func(base string) ([]string, string, string, error) {
+				volpath, subpathMount := getTestPaths(base)
+				mounts := []string{subpathMount}
+				if err := os.MkdirAll(volpath, defaultPerm); err != nil {
+					return nil, "", "", err
+				}
+
+				if err := os.MkdirAll(subpathMount, defaultPerm); err != nil {
+					return nil, "", "", err
+				}
+
+				socketFile, socketCreateError := createSocketFile(volpath)
+
+				return mounts, volpath, socketFile, socketCreateError
+			},
+			expectError: false,
+		},
+		{
+			name: "subpath-mounting-fifo",
+			prepare: func(base string) ([]string, string, string, error) {
+				volpath, subpathMount := getTestPaths(base)
+				mounts := []string{subpathMount}
+				if err := os.MkdirAll(volpath, defaultPerm); err != nil {
+					return nil, "", "", err
+				}
+
+				if err := os.MkdirAll(subpathMount, defaultPerm); err != nil {
+					return nil, "", "", err
+				}
+
+				testFifo := filepath.Join(volpath, "mount_test.fifo")
+				err := syscall.Mkfifo(testFifo, 0)
+				return mounts, volpath, testFifo, err
+			},
+			expectError: false,
+		},
+		{
+			name: "subpath-dir-readonly",
+			prepare: func(base string) ([]string, string, string, error) {
+				volpath, _ := getTestPaths(base)
+				subpath := filepath.Join(volpath, "dir0")
+				return nil, volpath, subpath, os.MkdirAll(subpath, defaultPerm)
+			},
+			expectError: false,
+			readOnly:    true,
+		},
+		{
+			name: "subpath-file-readonly",
+			prepare: func(base string) ([]string, string, string, error) {
+				volpath, _ := getTestPaths(base)
+				subpath := filepath.Join(volpath, "file0")
+				if err := os.MkdirAll(volpath, defaultPerm); err != nil {
+					return nil, "", "", err
+				}
+				return nil, volpath, subpath, ioutil.WriteFile(subpath, []byte{}, defaultPerm)
+			},
+			expectError: false,
+			readOnly:    true,
+		},
+		{
+			name: "subpath-dir-and-volume-readonly",
+			prepare: func(base string) ([]string, string, string, error) {
+				volpath, _ := getTestPaths(base)
+				subpath := filepath.Join(volpath, "dir0")
+				if err := os.MkdirAll(subpath, defaultPerm); err != nil {
+					return nil, "", "", err
+				}
+				return nil, volpath, subpath, os.Chmod(subpath, readOnlyPerm)
+			},
+			expectError: false,
+			readOnly:    true,
+		},
+		{
+			name: "subpath-file-and-vol-readonly",
+			prepare: func(base string) ([]string, string, string, error) {
+				volpath, _ := getTestPaths(base)
+				subpath := filepath.Join(volpath, "file0")
+				if err := os.MkdirAll(volpath, defaultPerm); err != nil {
+					return nil, "", "", err
+				}
+				return nil, volpath, subpath, ioutil.WriteFile(subpath, []byte{}, readOnlyPerm)
+			},
+			expectError: false,
+			readOnly:    true,
+		},
 	}
 
 	for _, test := range tests {
@@ -1187,6 +1279,7 @@ func TestBindSubPath(t *testing.T) {
 		if err != nil {
 			t.Fatalf(err.Error())
 		}
+
 		mounts, volPath, subPath, err := test.prepare(base)
 		if err != nil {
 			os.RemoveAll(base)
@@ -1202,6 +1295,7 @@ func TestBindSubPath(t *testing.T) {
 			VolumePath:       volPath,
 			PodDir:           filepath.Join(base, "pod0"),
 			ContainerName:    testContainer,
+			ReadOnly:         test.readOnly,
 		}
 
 		_, subpathMount := getTestPaths(base)
@@ -1227,10 +1321,37 @@ func TestBindSubPath(t *testing.T) {
 			if err = validateFileExists(subpathMount); err != nil {
 				t.Errorf("test %q failed: %v", test.name, err)
 			}
+			if err = validateReadOnlyMount(test.readOnly, bindPathTarget, fm); err != nil {
+				t.Errorf("test %q failed: %v", test.name, err)
+			}
 		}
 
 		os.RemoveAll(base)
 	}
+}
+
+func validateReadOnlyMount(expectedReadOnly bool, bindPathTarget string, mounter *FakeMounter) error {
+	mps, err := mounter.List()
+	if err != nil {
+		return fmt.Errorf("fakeMounter.List() returned error: %v", err)
+	}
+	for _, mp := range mps {
+		if mp.Path == bindPathTarget {
+			foundReadOnly := false
+			for _, opts := range mp.Opts {
+				if opts == "ro" {
+					foundReadOnly = true
+					break
+				}
+			}
+			if expectedReadOnly != foundReadOnly {
+				return fmt.Errorf("expected readOnly %v, got %v for mount point %v", expectedReadOnly, foundReadOnly, bindPathTarget)
+			} else {
+				return nil
+			}
+		}
+	}
+	return fmt.Errorf("failed to find mountPoint %v", bindPathTarget)
 }
 
 func TestParseMountInfo(t *testing.T) {
@@ -1308,6 +1429,7 @@ func TestParseMountInfo(t *testing.T) {
 
 func TestSafeOpen(t *testing.T) {
 	defaultPerm := os.FileMode(0750)
+
 	tests := []struct {
 		name string
 		// Function that prepares directory structure for the test under given
@@ -1435,6 +1557,32 @@ func TestSafeOpen(t *testing.T) {
 			"test",
 			true,
 		},
+		{
+			"mount-unix-socket",
+			func(base string) error {
+				socketFile, socketError := createSocketFile(base)
+
+				if socketError != nil {
+					return fmt.Errorf("Error preparing socket file %s with %v", socketFile, socketError)
+				}
+				return nil
+			},
+			"mt.sock",
+			false,
+		},
+		{
+			"mounting-unix-socket-in-middle",
+			func(base string) error {
+				testSocketFile, socketError := createSocketFile(base)
+
+				if socketError != nil {
+					return fmt.Errorf("Error preparing socket file %s with %v", testSocketFile, socketError)
+				}
+				return nil
+			},
+			"mt.sock/bar",
+			true,
+		},
 	}
 
 	for _, test := range tests {
@@ -1443,6 +1591,7 @@ func TestSafeOpen(t *testing.T) {
 		if err != nil {
 			t.Fatalf(err.Error())
 		}
+
 		test.prepare(base)
 		pathToCreate := filepath.Join(base, test.path)
 		fd, err := doSafeOpen(pathToCreate, base)
@@ -1459,6 +1608,25 @@ func TestSafeOpen(t *testing.T) {
 		syscall.Close(fd)
 		os.RemoveAll(base)
 	}
+}
+
+func createSocketFile(socketDir string) (string, error) {
+	testSocketFile := filepath.Join(socketDir, "mt.sock")
+
+	// Switch to volume path and create the socket file
+	// socket file can not have length of more than 108 character
+	// and hence we must use relative path
+	oldDir, _ := os.Getwd()
+
+	err := os.Chdir(socketDir)
+	if err != nil {
+		return "", err
+	}
+	defer func() {
+		os.Chdir(oldDir)
+	}()
+	_, socketCreateError := net.Listen("unix", "mt.sock")
+	return testSocketFile, socketCreateError
 }
 
 func TestFindExistingPrefix(t *testing.T) {
@@ -1551,6 +1719,17 @@ func TestFindExistingPrefix(t *testing.T) {
 			[]string{"test", "directory"},
 			false,
 		},
+		{
+			"with-fifo-in-middle",
+			func(base string) error {
+				testFifo := filepath.Join(base, "mount_test.fifo")
+				return syscall.Mkfifo(testFifo, 0)
+			},
+			"mount_test.fifo/directory",
+			"",
+			nil,
+			true,
+		},
 	}
 
 	for _, test := range tests {
@@ -1581,4 +1760,111 @@ func TestFindExistingPrefix(t *testing.T) {
 		}
 		os.RemoveAll(base)
 	}
+}
+
+func TestGetFileType(t *testing.T) {
+	mounter := Mounter{"fake/path", false}
+
+	testCase := []struct {
+		name         string
+		expectedType FileType
+		setUp        func() (string, string, error)
+	}{
+		{
+			"Directory Test",
+			FileTypeDirectory,
+			func() (string, string, error) {
+				tempDir, err := ioutil.TempDir("", "test-get-filetype-")
+				return tempDir, tempDir, err
+			},
+		},
+		{
+			"File Test",
+			FileTypeFile,
+			func() (string, string, error) {
+				tempFile, err := ioutil.TempFile("", "test-get-filetype")
+				if err != nil {
+					return "", "", err
+				}
+				tempFile.Close()
+				return tempFile.Name(), tempFile.Name(), nil
+			},
+		},
+		{
+			"Socket Test",
+			FileTypeSocket,
+			func() (string, string, error) {
+				tempDir, err := ioutil.TempDir("", "test-get-filetype-")
+				if err != nil {
+					return "", "", err
+				}
+				tempSocketFile, err := createSocketFile(tempDir)
+				return tempSocketFile, tempDir, err
+			},
+		},
+		{
+			"Block Device Test",
+			FileTypeBlockDev,
+			func() (string, string, error) {
+				tempDir, err := ioutil.TempDir("", "test-get-filetype-")
+				if err != nil {
+					return "", "", err
+				}
+
+				tempBlockFile := filepath.Join(tempDir, "test_blk_dev")
+				outputBytes, err := exec.New().Command("mknod", tempBlockFile, "b", "89", "1").CombinedOutput()
+				if err != nil {
+					err = fmt.Errorf("%v: %s ", err, outputBytes)
+				}
+				return tempBlockFile, tempDir, err
+			},
+		},
+		{
+			"Character Device Test",
+			FileTypeCharDev,
+			func() (string, string, error) {
+				tempDir, err := ioutil.TempDir("", "test-get-filetype-")
+				if err != nil {
+					return "", "", err
+				}
+
+				tempCharFile := filepath.Join(tempDir, "test_char_dev")
+				outputBytes, err := exec.New().Command("mknod", tempCharFile, "c", "89", "1").CombinedOutput()
+				if err != nil {
+					err = fmt.Errorf("%v: %s ", err, outputBytes)
+				}
+				return tempCharFile, tempDir, err
+			},
+		},
+	}
+
+	for idx, tc := range testCase {
+		path, cleanUpPath, err := tc.setUp()
+		if err != nil {
+			// Locally passed, but upstream CI is not friendly to create such device files
+			// Leave "Operation not permitted" out, which can be covered in an e2e test
+			if isOperationNotPermittedError(err) {
+				continue
+			}
+			t.Fatalf("[%d-%s] unexpected error : %v", idx, tc.name, err)
+		}
+		if len(cleanUpPath) > 0 {
+			defer os.RemoveAll(cleanUpPath)
+		}
+
+		fileType, err := mounter.GetFileType(path)
+		if err != nil {
+			t.Fatalf("[%d-%s] unexpected error : %v", idx, tc.name, err)
+		}
+		if fileType != tc.expectedType {
+			t.Fatalf("[%d-%s] expected %s, but got %s", idx, tc.name, tc.expectedType, fileType)
+		}
+	}
+}
+
+func isOperationNotPermittedError(err error) bool {
+	if strings.Contains(err.Error(), "Operation not permitted") {
+		return true
+	}
+	return false
 }

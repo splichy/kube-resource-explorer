@@ -20,6 +20,7 @@ package mount
 
 import (
 	"fmt"
+	"io/ioutil"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -138,7 +139,14 @@ func TestGetMountRefs(t *testing.T) {
 }
 
 func TestDoSafeMakeDir(t *testing.T) {
-	const testingVolumePath = `c:\tmp\DoSafeMakeDirTest`
+	base, err := ioutil.TempDir("", "TestDoSafeMakeDir")
+	if err != nil {
+		t.Fatalf(err.Error())
+	}
+
+	defer os.RemoveAll(base)
+
+	testingVolumePath := filepath.Join(base, "testingVolumePath")
 	os.MkdirAll(testingVolumePath, 0755)
 	defer os.RemoveAll(testingVolumePath)
 
@@ -170,7 +178,7 @@ func TestDoSafeMakeDir(t *testing.T) {
 			volumePath:    testingVolumePath,
 			subPath:       filepath.Join(testingVolumePath, `symlink`),
 			expectError:   false,
-			symlinkTarget: `c:\tmp`,
+			symlinkTarget: base,
 		},
 		{
 			volumePath:    testingVolumePath,
@@ -188,7 +196,7 @@ func TestDoSafeMakeDir(t *testing.T) {
 			volumePath:    testingVolumePath,
 			subPath:       filepath.Join(testingVolumePath, `a\b\symlink`),
 			expectError:   false,
-			symlinkTarget: `c:\tmp`,
+			symlinkTarget: base,
 		},
 		{
 			volumePath:    testingVolumePath,
@@ -227,7 +235,14 @@ func TestDoSafeMakeDir(t *testing.T) {
 }
 
 func TestLockAndCheckSubPath(t *testing.T) {
-	const testingVolumePath = `c:\tmp\LockAndCheckSubPathTest`
+	base, err := ioutil.TempDir("", "TestLockAndCheckSubPath")
+	if err != nil {
+		t.Fatalf(err.Error())
+	}
+
+	defer os.RemoveAll(base)
+
+	testingVolumePath := filepath.Join(base, "testingVolumePath")
 
 	tests := []struct {
 		volumePath          string
@@ -269,14 +284,14 @@ func TestLockAndCheckSubPath(t *testing.T) {
 			subPath:             filepath.Join(testingVolumePath, `symlink`),
 			expectedHandleCount: 0,
 			expectError:         true,
-			symlinkTarget:       `c:\tmp`,
+			symlinkTarget:       base,
 		},
 		{
 			volumePath:          testingVolumePath,
 			subPath:             filepath.Join(testingVolumePath, `a\b\c\symlink`),
 			expectedHandleCount: 0,
 			expectError:         true,
-			symlinkTarget:       `c:\tmp`,
+			symlinkTarget:       base,
 		},
 		{
 			volumePath:          testingVolumePath,
@@ -324,7 +339,14 @@ func TestLockAndCheckSubPath(t *testing.T) {
 }
 
 func TestLockAndCheckSubPathWithoutSymlink(t *testing.T) {
-	const testingVolumePath = `c:\tmp\LockAndCheckSubPathWithoutSymlinkTest`
+	base, err := ioutil.TempDir("", "TestLockAndCheckSubPathWithoutSymlink")
+	if err != nil {
+		t.Fatalf(err.Error())
+	}
+
+	defer os.RemoveAll(base)
+
+	testingVolumePath := filepath.Join(base, "testingVolumePath")
 
 	tests := []struct {
 		volumePath          string
@@ -366,14 +388,14 @@ func TestLockAndCheckSubPathWithoutSymlink(t *testing.T) {
 			subPath:             filepath.Join(testingVolumePath, `symlink`),
 			expectedHandleCount: 1,
 			expectError:         true,
-			symlinkTarget:       `c:\tmp`,
+			symlinkTarget:       base,
 		},
 		{
 			volumePath:          testingVolumePath,
 			subPath:             filepath.Join(testingVolumePath, `a\b\c\symlink`),
 			expectedHandleCount: 4,
 			expectError:         true,
-			symlinkTarget:       `c:\tmp`,
+			symlinkTarget:       base,
 		},
 		{
 			volumePath:          testingVolumePath,
@@ -421,7 +443,14 @@ func TestLockAndCheckSubPathWithoutSymlink(t *testing.T) {
 }
 
 func TestFindExistingPrefix(t *testing.T) {
-	const testingVolumePath = `c:\tmp\FindExistingPrefixTest`
+	base, err := ioutil.TempDir("", "TestFindExistingPrefix")
+	if err != nil {
+		t.Fatalf(err.Error())
+	}
+
+	defer os.RemoveAll(base)
+
+	testingVolumePath := filepath.Join(base, "testingVolumePath")
 
 	tests := []struct {
 		base                    string
@@ -549,5 +578,54 @@ func TestPathWithinBase(t *testing.T) {
 		result := pathWithinBase(test.fullPath, test.basePath)
 		assert.Equal(t, result, test.expectedResult, "Expect result not equal with pathWithinBase(%s, %s) return: %q, expected: %q",
 			test.fullPath, test.basePath, result, test.expectedResult)
+	}
+}
+
+func TestGetFileType(t *testing.T) {
+	mounter := New("fake/path")
+
+	testCase := []struct {
+		name         string
+		expectedType FileType
+		setUp        func() (string, string, error)
+	}{
+		{
+			"Directory Test",
+			FileTypeDirectory,
+			func() (string, string, error) {
+				tempDir, err := ioutil.TempDir("", "test-get-filetype-")
+				return tempDir, tempDir, err
+			},
+		},
+		{
+			"File Test",
+			FileTypeFile,
+			func() (string, string, error) {
+				tempFile, err := ioutil.TempFile("", "test-get-filetype")
+				if err != nil {
+					return "", "", err
+				}
+				tempFile.Close()
+				return tempFile.Name(), tempFile.Name(), nil
+			},
+		},
+	}
+
+	for idx, tc := range testCase {
+		path, cleanUpPath, err := tc.setUp()
+		if err != nil {
+			t.Fatalf("[%d-%s] unexpected error : %v", idx, tc.name, err)
+		}
+		if len(cleanUpPath) > 0 {
+			defer os.RemoveAll(cleanUpPath)
+		}
+
+		fileType, err := mounter.GetFileType(path)
+		if err != nil {
+			t.Fatalf("[%d-%s] unexpected error : %v", idx, tc.name, err)
+		}
+		if fileType != tc.expectedType {
+			t.Fatalf("[%d-%s] expected %s, but got %s", idx, tc.name, tc.expectedType, fileType)
+		}
 	}
 }

@@ -192,6 +192,9 @@ func TestNodeStatusWithCloudProviderNodeIP(t *testing.T) {
 		Err: nil,
 	}
 	kubelet.cloud = fakeCloud
+	kubelet.cloudproviderRequestParallelism = make(chan int, 1)
+	kubelet.cloudproviderRequestSync = make(chan int)
+	kubelet.cloudproviderRequestTimeout = 10 * time.Second
 
 	kubelet.setNodeAddress(&existingNode)
 
@@ -639,8 +642,8 @@ func TestUpdateExistingNodeStatusTimeout(t *testing.T) {
 	assert.Error(t, kubelet.updateNodeStatus())
 
 	// should have attempted multiple times
-	if actualAttempts := atomic.LoadInt64(&attempts); actualAttempts != nodeStatusUpdateRetry {
-		t.Errorf("Expected %d attempts, got %d", nodeStatusUpdateRetry, actualAttempts)
+	if actualAttempts := atomic.LoadInt64(&attempts); actualAttempts < nodeStatusUpdateRetry {
+		t.Errorf("Expected at least %d attempts, got %d", nodeStatusUpdateRetry, actualAttempts)
 	}
 }
 
@@ -912,7 +915,6 @@ func TestRegisterWithApiServer(t *testing.T) {
 					kubeletapis.LabelArch:     goruntime.GOARCH,
 				},
 			},
-			Spec: v1.NodeSpec{ExternalID: testKubeletHostname},
 		}, nil
 	})
 	kubeClient.AddReactor("*", "*", func(action core.Action) (bool, runtime.Object, error) {
@@ -966,7 +968,7 @@ func TestTryRegisterWithApiServer(t *testing.T) {
 		ErrStatus: metav1.Status{Reason: metav1.StatusReasonConflict},
 	}
 
-	newNode := func(cmad bool, externalID string) *v1.Node {
+	newNode := func(cmad bool) *v1.Node {
 		node := &v1.Node{
 			ObjectMeta: metav1.ObjectMeta{
 				Labels: map[string]string{
@@ -974,9 +976,6 @@ func TestTryRegisterWithApiServer(t *testing.T) {
 					kubeletapis.LabelOS:       goruntime.GOOS,
 					kubeletapis.LabelArch:     goruntime.GOARCH,
 				},
-			},
-			Spec: v1.NodeSpec{
-				ExternalID: externalID,
 			},
 		}
 
@@ -1010,17 +1009,17 @@ func TestTryRegisterWithApiServer(t *testing.T) {
 		},
 		{
 			name:            "success case - existing node - no change in CMAD",
-			newNode:         newNode(true, "a"),
+			newNode:         newNode(true),
 			createError:     alreadyExists,
-			existingNode:    newNode(true, "a"),
+			existingNode:    newNode(true),
 			expectedResult:  true,
 			expectedActions: 2,
 		},
 		{
 			name:            "success case - existing node - CMAD disabled",
-			newNode:         newNode(false, "a"),
+			newNode:         newNode(false),
 			createError:     alreadyExists,
-			existingNode:    newNode(true, "a"),
+			existingNode:    newNode(true),
 			expectedResult:  true,
 			expectedActions: 3,
 			testSavedNode:   true,
@@ -1029,9 +1028,9 @@ func TestTryRegisterWithApiServer(t *testing.T) {
 		},
 		{
 			name:            "success case - existing node - CMAD enabled",
-			newNode:         newNode(true, "a"),
+			newNode:         newNode(true),
 			createError:     alreadyExists,
-			existingNode:    newNode(false, "a"),
+			existingNode:    newNode(false),
 			expectedResult:  true,
 			expectedActions: 3,
 			testSavedNode:   true,
@@ -1039,23 +1038,15 @@ func TestTryRegisterWithApiServer(t *testing.T) {
 			savedNodeCMAD:   true,
 		},
 		{
-			name:            "success case - external ID changed",
-			newNode:         newNode(false, "b"),
-			createError:     alreadyExists,
-			existingNode:    newNode(false, "a"),
-			expectedResult:  false,
-			expectedActions: 3,
-		},
-		{
 			name:            "create failed",
-			newNode:         newNode(false, "b"),
+			newNode:         newNode(false),
 			createError:     conflict,
 			expectedResult:  false,
 			expectedActions: 1,
 		},
 		{
 			name:            "get existing node failed",
-			newNode:         newNode(false, "a"),
+			newNode:         newNode(false),
 			createError:     alreadyExists,
 			getError:        conflict,
 			expectedResult:  false,
@@ -1063,19 +1054,10 @@ func TestTryRegisterWithApiServer(t *testing.T) {
 		},
 		{
 			name:            "update existing node failed",
-			newNode:         newNode(false, "a"),
+			newNode:         newNode(false),
 			createError:     alreadyExists,
-			existingNode:    newNode(true, "a"),
+			existingNode:    newNode(true),
 			patchError:      conflict,
-			expectedResult:  false,
-			expectedActions: 3,
-		},
-		{
-			name:            "delete existing node failed",
-			newNode:         newNode(false, "b"),
-			createError:     alreadyExists,
-			existingNode:    newNode(false, "a"),
-			deleteError:     conflict,
 			expectedResult:  false,
 			expectedActions: 3,
 		},
@@ -1414,5 +1396,96 @@ func TestUpdateDefaultLabels(t *testing.T) {
 		needsUpdate := kubelet.updateDefaultLabels(tc.initialNode, tc.existingNode)
 		assert.Equal(t, tc.needsUpdate, needsUpdate, tc.name)
 		assert.Equal(t, tc.finalLabels, tc.existingNode.Labels, tc.name)
+	}
+}
+
+func TestValidateNodeIPParam(t *testing.T) {
+	type test struct {
+		nodeIP   string
+		success  bool
+		testName string
+	}
+	tests := []test{
+		{
+			nodeIP:   "",
+			success:  false,
+			testName: "IP not set",
+		},
+		{
+			nodeIP:   "127.0.0.1",
+			success:  false,
+			testName: "IPv4 loopback address",
+		},
+		{
+			nodeIP:   "::1",
+			success:  false,
+			testName: "IPv6 loopback address",
+		},
+		{
+			nodeIP:   "224.0.0.1",
+			success:  false,
+			testName: "multicast IPv4 address",
+		},
+		{
+			nodeIP:   "ff00::1",
+			success:  false,
+			testName: "multicast IPv6 address",
+		},
+		{
+			nodeIP:   "169.254.0.1",
+			success:  false,
+			testName: "IPv4 link-local unicast address",
+		},
+		{
+			nodeIP:   "fe80::0202:b3ff:fe1e:8329",
+			success:  false,
+			testName: "IPv6 link-local unicast address",
+		},
+		{
+			nodeIP:   "0.0.0.0",
+			success:  false,
+			testName: "Unspecified IPv4 address",
+		},
+		{
+			nodeIP:   "::",
+			success:  false,
+			testName: "Unspecified IPv6 address",
+		},
+		{
+			nodeIP:   "1.2.3.4",
+			success:  false,
+			testName: "IPv4 address that doesn't belong to host",
+		},
+	}
+	addrs, err := net.InterfaceAddrs()
+	if err != nil {
+		assert.Error(t, err, fmt.Sprintf(
+			"Unable to obtain a list of the node's unicast interface addresses."))
+	}
+	for _, addr := range addrs {
+		var ip net.IP
+		switch v := addr.(type) {
+		case *net.IPNet:
+			ip = v.IP
+		case *net.IPAddr:
+			ip = v.IP
+		}
+		if ip.IsLoopback() || ip.IsLinkLocalUnicast() {
+			break
+		}
+		successTest := test{
+			nodeIP:   ip.String(),
+			success:  true,
+			testName: fmt.Sprintf("Success test case for address %s", ip.String()),
+		}
+		tests = append(tests, successTest)
+	}
+	for _, test := range tests {
+		err := validateNodeIP(net.ParseIP(test.nodeIP))
+		if test.success {
+			assert.NoError(t, err, "test %s", test.testName)
+		} else {
+			assert.Error(t, err, fmt.Sprintf("test %s", test.testName))
+		}
 	}
 }

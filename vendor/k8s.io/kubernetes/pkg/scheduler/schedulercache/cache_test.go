@@ -30,6 +30,9 @@ import (
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/intstr"
+	"k8s.io/apimachinery/pkg/util/wait"
+	utilfeature "k8s.io/apiserver/pkg/util/feature"
+	"k8s.io/kubernetes/pkg/features"
 	priorityutil "k8s.io/kubernetes/pkg/scheduler/algorithm/priorities/util"
 	schedutil "k8s.io/kubernetes/pkg/scheduler/util"
 )
@@ -73,6 +76,8 @@ func (b *hostPortInfoBuilder) build() schedutil.HostPortInfo {
 // TestAssumePodScheduled tests that after a pod is assumed, its information is aggregated
 // on node level.
 func TestAssumePodScheduled(t *testing.T) {
+	// Enable volumesOnNodeForBalancing to do balanced resource allocation
+	utilfeature.DefaultFeatureGate.Set(fmt.Sprintf("%s=true", features.BalanceAttachedNodeVolumes))
 	nodeName := "node"
 	testPods := []*v1.Pod{
 		makeBasePod(t, nodeName, "test", "100m", "500", "", []v1.ContainerPort{{HostIP: "127.0.0.1", HostPort: 80, Protocol: "TCP"}}),
@@ -99,6 +104,7 @@ func TestAssumePodScheduled(t *testing.T) {
 				MilliCPU: 100,
 				Memory:   500,
 			},
+			TransientInfo:       newTransientSchedulerInfo(),
 			allocatableResource: &Resource{},
 			pods:                []*v1.Pod{testPods[0]},
 			usedPorts:           newHostPortInfoBuilder().add("TCP", "127.0.0.1", 80).build(),
@@ -114,6 +120,7 @@ func TestAssumePodScheduled(t *testing.T) {
 				MilliCPU: 300,
 				Memory:   1524,
 			},
+			TransientInfo:       newTransientSchedulerInfo(),
 			allocatableResource: &Resource{},
 			pods:                []*v1.Pod{testPods[1], testPods[2]},
 			usedPorts:           newHostPortInfoBuilder().add("TCP", "127.0.0.1", 80).add("TCP", "127.0.0.1", 8080).build(),
@@ -129,6 +136,7 @@ func TestAssumePodScheduled(t *testing.T) {
 				MilliCPU: priorityutil.DefaultMilliCPURequest,
 				Memory:   priorityutil.DefaultMemoryRequest,
 			},
+			TransientInfo:       newTransientSchedulerInfo(),
 			allocatableResource: &Resource{},
 			pods:                []*v1.Pod{testPods[3]},
 			usedPorts:           newHostPortInfoBuilder().add("TCP", "127.0.0.1", 80).build(),
@@ -145,6 +153,7 @@ func TestAssumePodScheduled(t *testing.T) {
 				MilliCPU: 100,
 				Memory:   500,
 			},
+			TransientInfo:       newTransientSchedulerInfo(),
 			allocatableResource: &Resource{},
 			pods:                []*v1.Pod{testPods[4]},
 			usedPorts:           newHostPortInfoBuilder().add("TCP", "127.0.0.1", 80).build(),
@@ -161,6 +170,7 @@ func TestAssumePodScheduled(t *testing.T) {
 				MilliCPU: 300,
 				Memory:   1524,
 			},
+			TransientInfo:       newTransientSchedulerInfo(),
 			allocatableResource: &Resource{},
 			pods:                []*v1.Pod{testPods[4], testPods[5]},
 			usedPorts:           newHostPortInfoBuilder().add("TCP", "127.0.0.1", 80).add("TCP", "127.0.0.1", 8080).build(),
@@ -176,6 +186,7 @@ func TestAssumePodScheduled(t *testing.T) {
 				MilliCPU: 100,
 				Memory:   500,
 			},
+			TransientInfo:       newTransientSchedulerInfo(),
 			allocatableResource: &Resource{},
 			pods:                []*v1.Pod{testPods[6]},
 			usedPorts:           newHostPortInfoBuilder().build(),
@@ -219,6 +230,8 @@ func assumeAndFinishBinding(cache *schedulerCache, pod *v1.Pod, assumedTime time
 // TestExpirePod tests that assumed pods will be removed if expired.
 // The removal will be reflected in node info.
 func TestExpirePod(t *testing.T) {
+	// Enable volumesOnNodeForBalancing to do balanced resource allocation
+	utilfeature.DefaultFeatureGate.Set(fmt.Sprintf("%s=true", features.BalanceAttachedNodeVolumes))
 	nodeName := "node"
 	testPods := []*v1.Pod{
 		makeBasePod(t, nodeName, "test-1", "100m", "500", "", []v1.ContainerPort{{HostIP: "127.0.0.1", HostPort: 80, Protocol: "TCP"}}),
@@ -252,6 +265,7 @@ func TestExpirePod(t *testing.T) {
 				MilliCPU: 200,
 				Memory:   1024,
 			},
+			TransientInfo:       newTransientSchedulerInfo(),
 			allocatableResource: &Resource{},
 			pods:                []*v1.Pod{testPods[1]},
 			usedPorts:           newHostPortInfoBuilder().add("TCP", "127.0.0.1", 8080).build(),
@@ -276,6 +290,8 @@ func TestExpirePod(t *testing.T) {
 // TestAddPodWillConfirm tests that a pod being Add()ed will be confirmed if assumed.
 // The pod info should still exist after manually expiring unconfirmed pods.
 func TestAddPodWillConfirm(t *testing.T) {
+	// Enable volumesOnNodeForBalancing to do balanced resource allocation
+	utilfeature.DefaultFeatureGate.Set(fmt.Sprintf("%s=true", features.BalanceAttachedNodeVolumes))
 	nodeName := "node"
 	now := time.Now()
 	ttl := 10 * time.Second
@@ -301,6 +317,7 @@ func TestAddPodWillConfirm(t *testing.T) {
 				MilliCPU: 100,
 				Memory:   500,
 			},
+			TransientInfo:       newTransientSchedulerInfo(),
 			allocatableResource: &Resource{},
 			pods:                []*v1.Pod{testPods[0]},
 			usedPorts:           newHostPortInfoBuilder().add("TCP", "127.0.0.1", 80).build(),
@@ -323,6 +340,46 @@ func TestAddPodWillConfirm(t *testing.T) {
 		// check after expiration. confirmed pods shouldn't be expired.
 		n := cache.nodes[nodeName]
 		deepEqualWithoutGeneration(t, i, n, tt.wNodeInfo)
+	}
+}
+
+func TestSnapshot(t *testing.T) {
+	nodeName := "node"
+	now := time.Now()
+	ttl := 10 * time.Second
+
+	testPods := []*v1.Pod{
+		makeBasePod(t, nodeName, "test-1", "100m", "500", "", []v1.ContainerPort{{HostIP: "127.0.0.1", HostPort: 80, Protocol: "TCP"}}),
+		makeBasePod(t, nodeName, "test-2", "200m", "1Ki", "", []v1.ContainerPort{{HostIP: "127.0.0.1", HostPort: 80, Protocol: "TCP"}}),
+	}
+	tests := []struct {
+		podsToAssume []*v1.Pod
+		podsToAdd    []*v1.Pod
+	}{{ // two pod were assumed at same time. But first one is called Add() and gets confirmed.
+		podsToAssume: []*v1.Pod{testPods[0], testPods[1]},
+		podsToAdd:    []*v1.Pod{testPods[0]},
+	}}
+
+	for _, tt := range tests {
+		cache := newSchedulerCache(ttl, time.Second, nil)
+		for _, podToAssume := range tt.podsToAssume {
+			if err := assumeAndFinishBinding(cache, podToAssume, now); err != nil {
+				t.Fatalf("assumePod failed: %v", err)
+			}
+		}
+		for _, podToAdd := range tt.podsToAdd {
+			if err := cache.AddPod(podToAdd); err != nil {
+				t.Fatalf("AddPod failed: %v", err)
+			}
+		}
+
+		snapshot := cache.Snapshot()
+		if !reflect.DeepEqual(snapshot.Nodes, cache.nodes) {
+			t.Fatalf("expect \n%+v; got \n%+v", cache.nodes, snapshot.Nodes)
+		}
+		if !reflect.DeepEqual(snapshot.AssumedPods, cache.assumedPods) {
+			t.Fatalf("expect \n%+v; got \n%+v", cache.assumedPods, snapshot.AssumedPods)
+		}
 	}
 }
 
@@ -356,6 +413,7 @@ func TestAddPodWillReplaceAssumed(t *testing.T) {
 					MilliCPU: 200,
 					Memory:   500,
 				},
+				TransientInfo:       newTransientSchedulerInfo(),
 				allocatableResource: &Resource{},
 				pods:                []*v1.Pod{updatedPod.DeepCopy()},
 				usedPorts:           newHostPortInfoBuilder().add("TCP", "0.0.0.0", 90).build(),
@@ -390,6 +448,8 @@ func TestAddPodWillReplaceAssumed(t *testing.T) {
 
 // TestAddPodAfterExpiration tests that a pod being Add()ed will be added back if expired.
 func TestAddPodAfterExpiration(t *testing.T) {
+	// Enable volumesOnNodeForBalancing to do balanced resource allocation
+	utilfeature.DefaultFeatureGate.Set(fmt.Sprintf("%s=true", features.BalanceAttachedNodeVolumes))
 	nodeName := "node"
 	ttl := 10 * time.Second
 	basePod := makeBasePod(t, nodeName, "test", "100m", "500", "", []v1.ContainerPort{{HostIP: "127.0.0.1", HostPort: 80, Protocol: "TCP"}})
@@ -408,6 +468,7 @@ func TestAddPodAfterExpiration(t *testing.T) {
 				MilliCPU: 100,
 				Memory:   500,
 			},
+			TransientInfo:       newTransientSchedulerInfo(),
 			allocatableResource: &Resource{},
 			pods:                []*v1.Pod{basePod},
 			usedPorts:           newHostPortInfoBuilder().add("TCP", "127.0.0.1", 80).build(),
@@ -437,6 +498,8 @@ func TestAddPodAfterExpiration(t *testing.T) {
 
 // TestUpdatePod tests that a pod will be updated if added before.
 func TestUpdatePod(t *testing.T) {
+	// Enable volumesOnNodeForBalancing to do balanced resource allocation
+	utilfeature.DefaultFeatureGate.Set(fmt.Sprintf("%s=true", features.BalanceAttachedNodeVolumes))
 	nodeName := "node"
 	ttl := 10 * time.Second
 	testPods := []*v1.Pod{
@@ -461,6 +524,7 @@ func TestUpdatePod(t *testing.T) {
 				MilliCPU: 200,
 				Memory:   1024,
 			},
+			TransientInfo:       newTransientSchedulerInfo(),
 			allocatableResource: &Resource{},
 			pods:                []*v1.Pod{testPods[1]},
 			usedPorts:           newHostPortInfoBuilder().add("TCP", "127.0.0.1", 8080).build(),
@@ -473,6 +537,7 @@ func TestUpdatePod(t *testing.T) {
 				MilliCPU: 100,
 				Memory:   500,
 			},
+			TransientInfo:       newTransientSchedulerInfo(),
 			allocatableResource: &Resource{},
 			pods:                []*v1.Pod{testPods[0]},
 			usedPorts:           newHostPortInfoBuilder().add("TCP", "127.0.0.1", 80).build(),
@@ -503,6 +568,8 @@ func TestUpdatePod(t *testing.T) {
 
 // TestExpireAddUpdatePod test the sequence that a pod is expired, added, then updated
 func TestExpireAddUpdatePod(t *testing.T) {
+	// Enable volumesOnNodeForBalancing to do balanced resource allocation
+	utilfeature.DefaultFeatureGate.Set(fmt.Sprintf("%s=true", features.BalanceAttachedNodeVolumes))
 	nodeName := "node"
 	ttl := 10 * time.Second
 	testPods := []*v1.Pod{
@@ -528,6 +595,7 @@ func TestExpireAddUpdatePod(t *testing.T) {
 				MilliCPU: 200,
 				Memory:   1024,
 			},
+			TransientInfo:       newTransientSchedulerInfo(),
 			allocatableResource: &Resource{},
 			pods:                []*v1.Pod{testPods[1]},
 			usedPorts:           newHostPortInfoBuilder().add("TCP", "127.0.0.1", 8080).build(),
@@ -540,6 +608,7 @@ func TestExpireAddUpdatePod(t *testing.T) {
 				MilliCPU: 100,
 				Memory:   500,
 			},
+			TransientInfo:       newTransientSchedulerInfo(),
 			allocatableResource: &Resource{},
 			pods:                []*v1.Pod{testPods[0]},
 			usedPorts:           newHostPortInfoBuilder().add("TCP", "127.0.0.1", 80).build(),
@@ -598,6 +667,8 @@ func makePodWithEphemeralStorage(nodeName, ephemeralStorage string) *v1.Pod {
 }
 
 func TestEphemeralStorageResource(t *testing.T) {
+	// Enable volumesOnNodeForBalancing to do balanced resource allocation
+	utilfeature.DefaultFeatureGate.Set(fmt.Sprintf("%s=true", features.BalanceAttachedNodeVolumes))
 	nodeName := "node"
 	podE := makePodWithEphemeralStorage(nodeName, "500")
 	tests := []struct {
@@ -614,6 +685,7 @@ func TestEphemeralStorageResource(t *testing.T) {
 					MilliCPU: priorityutil.DefaultMilliCPURequest,
 					Memory:   priorityutil.DefaultMemoryRequest,
 				},
+				TransientInfo:       newTransientSchedulerInfo(),
 				allocatableResource: &Resource{},
 				pods:                []*v1.Pod{podE},
 				usedPorts:           schedutil.HostPortInfo{},
@@ -641,6 +713,8 @@ func TestEphemeralStorageResource(t *testing.T) {
 
 // TestRemovePod tests after added pod is removed, its information should also be subtracted.
 func TestRemovePod(t *testing.T) {
+	// Enable volumesOnNodeForBalancing to do balanced resource allocation
+	utilfeature.DefaultFeatureGate.Set(fmt.Sprintf("%s=true", features.BalanceAttachedNodeVolumes))
 	nodeName := "node"
 	basePod := makeBasePod(t, nodeName, "test", "100m", "500", "", []v1.ContainerPort{{HostIP: "127.0.0.1", HostPort: 80, Protocol: "TCP"}})
 	tests := []struct {
@@ -657,6 +731,7 @@ func TestRemovePod(t *testing.T) {
 				MilliCPU: 100,
 				Memory:   500,
 			},
+			TransientInfo:       newTransientSchedulerInfo(),
 			allocatableResource: &Resource{},
 			pods:                []*v1.Pod{basePod},
 			usedPorts:           newHostPortInfoBuilder().add("TCP", "127.0.0.1", 80).build(),
@@ -917,6 +992,8 @@ func TestNodeOperators(t *testing.T) {
 			t.Errorf("Failed to find node %v in schedulercache.", node.Name)
 		}
 
+		// Generations are globally unique. We check in our unit tests that they are incremented correctly.
+		expected.generation = got.generation
 		if !reflect.DeepEqual(got, expected) {
 			t.Errorf("Failed to add node into schedulercache:\n got: %+v \nexpected: %+v", got, expected)
 		}
@@ -928,6 +1005,7 @@ func TestNodeOperators(t *testing.T) {
 		if !found || len(cachedNodes) != 1 {
 			t.Errorf("failed to dump cached nodes:\n got: %v \nexpected: %v", cachedNodes, cache.nodes)
 		}
+		expected.generation = newNode.generation
 		if !reflect.DeepEqual(newNode, expected) {
 			t.Errorf("Failed to clone node:\n got: %+v, \n expected: %+v", newNode, expected)
 		}
@@ -935,12 +1013,15 @@ func TestNodeOperators(t *testing.T) {
 		// Case 3: update node attribute successfully.
 		node.Status.Allocatable[v1.ResourceMemory] = mem50m
 		expected.allocatableResource.Memory = mem50m.Value()
-		expected.generation++
 		cache.UpdateNode(nil, node)
 		got, found = cache.nodes[node.Name]
 		if !found {
 			t.Errorf("Failed to find node %v in schedulercache after UpdateNode.", node.Name)
 		}
+		if got.generation <= expected.generation {
+			t.Errorf("generation is not incremented. got: %v, expected: %v", got.generation, expected.generation)
+		}
+		expected.generation = got.generation
 
 		if !reflect.DeepEqual(got, expected) {
 			t.Errorf("Failed to update node in schedulercache:\n got: %+v \nexpected: %+v", got, expected)
@@ -959,6 +1040,17 @@ func BenchmarkList1kNodes30kPods(b *testing.B) {
 	b.ResetTimer()
 	for n := 0; n < b.N; n++ {
 		cache.List(labels.Everything())
+	}
+}
+
+func BenchmarkUpdate1kNodes30kPods(b *testing.B) {
+	// Enable volumesOnNodeForBalancing to do balanced resource allocation
+	utilfeature.DefaultFeatureGate.Set(fmt.Sprintf("%s=true", features.BalanceAttachedNodeVolumes))
+	cache := setupCacheOf1kNodes30kPods(b)
+	b.ResetTimer()
+	for n := 0; n < b.N; n++ {
+		cachedNodes := map[string]*NodeInfo{}
+		cache.UpdateNodeNameToInfoMap(cachedNodes)
 	}
 }
 
@@ -1052,13 +1144,14 @@ func setupCacheWithAssumedPods(b *testing.B, podNum int, assumedTime time.Time) 
 	return cache
 }
 
-func makePDB(name, namespace string, labels map[string]string, minAvailable int) *v1beta1.PodDisruptionBudget {
+func makePDB(name, namespace string, uid types.UID, labels map[string]string, minAvailable int) *v1beta1.PodDisruptionBudget {
 	intstrMin := intstr.FromInt(minAvailable)
 	pdb := &v1beta1.PodDisruptionBudget{
 		ObjectMeta: metav1.ObjectMeta{
 			Namespace: namespace,
 			Name:      name,
 			Labels:    labels,
+			UID:       uid,
 		},
 		Spec: v1beta1.PodDisruptionBudgetSpec{
 			MinAvailable: &intstrMin,
@@ -1073,14 +1166,14 @@ func makePDB(name, namespace string, labels map[string]string, minAvailable int)
 func TestPDBOperations(t *testing.T) {
 	ttl := 10 * time.Second
 	testPDBs := []*v1beta1.PodDisruptionBudget{
-		makePDB("pdb0", "ns1", map[string]string{"tkey1": "tval1"}, 3),
-		makePDB("pdb1", "ns1", map[string]string{"tkey1": "tval1", "tkey2": "tval2"}, 1),
-		makePDB("pdb2", "ns3", map[string]string{"tkey3": "tval3", "tkey2": "tval2"}, 10),
+		makePDB("pdb0", "ns1", "uid0", map[string]string{"tkey1": "tval1"}, 3),
+		makePDB("pdb1", "ns1", "uid1", map[string]string{"tkey1": "tval1", "tkey2": "tval2"}, 1),
+		makePDB("pdb2", "ns3", "uid2", map[string]string{"tkey3": "tval3", "tkey2": "tval2"}, 10),
 	}
 	updatedPDBs := []*v1beta1.PodDisruptionBudget{
-		makePDB("pdb0", "ns1", map[string]string{"tkey4": "tval4"}, 8),
-		makePDB("pdb1", "ns1", map[string]string{"tkey1": "tval1"}, 1),
-		makePDB("pdb2", "ns3", map[string]string{"tkey3": "tval3", "tkey1": "tval1", "tkey2": "tval2"}, 10),
+		makePDB("pdb0", "ns1", "uid0", map[string]string{"tkey4": "tval4"}, 8),
+		makePDB("pdb1", "ns1", "uid1", map[string]string{"tkey1": "tval1"}, 1),
+		makePDB("pdb2", "ns3", "uid2", map[string]string{"tkey3": "tval3", "tkey1": "tval1", "tkey2": "tval2"}, 10),
 	}
 	tests := []struct {
 		pdbsToAdd    []*v1beta1.PodDisruptionBudget
@@ -1140,7 +1233,7 @@ func TestPDBOperations(t *testing.T) {
 			found := false
 			// find it among the cached ones
 			for _, cpdb := range cachedPDBs {
-				if pdb.Name == cpdb.Name {
+				if pdb.UID == cpdb.UID {
 					found = true
 					if !reflect.DeepEqual(pdb, cpdb) {
 						t.Errorf("%v is not equal to %v", pdb, cpdb)
@@ -1149,9 +1242,32 @@ func TestPDBOperations(t *testing.T) {
 				}
 			}
 			if !found {
-				t.Errorf("PDB with name '%v' was not found in the cache.", pdb.Name)
+				t.Errorf("PDB with uid '%v' was not found in the cache.", pdb.UID)
 			}
 
 		}
+	}
+}
+
+func TestIsUpToDate(t *testing.T) {
+	cache := New(time.Duration(0), wait.NeverStop)
+	if err := cache.AddNode(&v1.Node{ObjectMeta: metav1.ObjectMeta{Name: "n1"}}); err != nil {
+		t.Errorf("Could not add node: %v", err)
+	}
+	s := cache.Snapshot()
+	node := s.Nodes["n1"]
+	if !cache.IsUpToDate(node) {
+		t.Errorf("Node incorrectly marked as stale")
+	}
+	pod := &v1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "p1", UID: "p1"}, Spec: v1.PodSpec{NodeName: "n1"}}
+	if err := cache.AddPod(pod); err != nil {
+		t.Errorf("Could not add pod: %v", err)
+	}
+	if cache.IsUpToDate(node) {
+		t.Errorf("Node incorrectly marked as up to date")
+	}
+	badNode := &NodeInfo{node: &v1.Node{ObjectMeta: metav1.ObjectMeta{Name: "n2"}}}
+	if cache.IsUpToDate(badNode) {
+		t.Errorf("Nonexistant node incorrectly marked as up to date")
 	}
 }

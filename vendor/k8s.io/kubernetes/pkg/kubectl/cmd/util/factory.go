@@ -33,9 +33,10 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/watch"
 	"k8s.io/client-go/discovery"
+	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/kubernetes"
 	restclient "k8s.io/client-go/rest"
-	"k8s.io/client-go/tools/clientcmd"
+	scaleclient "k8s.io/client-go/scale"
 	api "k8s.io/kubernetes/pkg/apis/core"
 	apiv1 "k8s.io/kubernetes/pkg/apis/core/v1"
 	"k8s.io/kubernetes/pkg/client/clientset_generated/internalclientset"
@@ -91,6 +92,9 @@ type ClientAccessFactory interface {
 	// ClientSet gives you back an internal, generated clientset
 	ClientSet() (internalclientset.Interface, error)
 
+	// DynamicClient returns a dynamic client ready for use
+	DynamicClient() (dynamic.DynamicInterface, error)
+
 	// KubernetesClientSet gives you back an external clientset
 	KubernetesClientSet() (*kubernetes.Clientset, error)
 
@@ -117,18 +121,12 @@ type ClientAccessFactory interface {
 	// LabelsForObject returns the labels associated with the provided object
 	LabelsForObject(object runtime.Object) (map[string]string, error)
 
-	// Returns internal flagset
-	FlagSet() *pflag.FlagSet
 	// Command will stringify and return all environment arguments ie. a command run by a client
 	// using the factory.
 	Command(cmd *cobra.Command, showSecrets bool) string
+
 	// BindFlags adds any flags that are common to all kubectl sub commands.
 	BindFlags(flags *pflag.FlagSet)
-	// BindExternalFlags adds any flags defined by external projects (not part of pflags)
-	BindExternalFlags(flags *pflag.FlagSet)
-
-	// DefaultResourceFilterFunc returns a collection of FilterFuncs suitable for filtering specific resource types.
-	DefaultResourceFilterFunc() kubectl.Filters
 
 	// SuggestedPodTemplateResources returns a list of resource types that declare a pod template
 	SuggestedPodTemplateResources() []schema.GroupResource
@@ -168,7 +166,7 @@ type ClientAccessFactory interface {
 // Generally they provide object typing and functions that build requests based on the negotiated clients.
 type ObjectMappingFactory interface {
 	// Returns interfaces for dealing with arbitrary runtime.Objects.
-	Object() (meta.RESTMapper, runtime.ObjectTyper)
+	RESTMapper() (meta.RESTMapper, error)
 	// Returns interface for expanding categories like `all`.
 	CategoryExpander() categories.CategoryExpander
 	// Returns a RESTClient for working with the specified RESTMapping or an error. This is intended
@@ -181,10 +179,6 @@ type ObjectMappingFactory interface {
 
 	// LogsForObject returns a request for the logs associated with the provided object
 	LogsForObject(object, options runtime.Object, timeout time.Duration) (*restclient.Request, error)
-	// Returns a Scaler for changing the size of the specified RESTMapping type or an error
-	Scaler(mapping *meta.RESTMapping) (kubectl.Scaler, error)
-	// Returns a Reaper for gracefully shutting down resources.
-	Reaper(mapping *meta.RESTMapping) (kubectl.Reaper, error)
 	// Returns a HistoryViewer for viewing change history
 	HistoryViewer(mapping *meta.RESTMapping) (kubectl.HistoryViewer, error)
 	// Returns a Rollbacker for changing the rollback version of the specified RESTMapping type or an error
@@ -216,6 +210,12 @@ type BuilderFactory interface {
 	PluginLoader() plugins.PluginLoader
 	// PluginRunner provides the implementation to be used to run cli plugins.
 	PluginRunner() plugins.PluginRunner
+	// Returns a Scaler for changing the size of the specified RESTMapping type or an error
+	Scaler() (kubectl.Scaler, error)
+	// ScaleClient gives you back scale getter
+	ScaleClient() (scaleclient.ScalesGetter, error)
+	// Returns a Reaper for gracefully shutting down resources.
+	Reaper(mapping *meta.RESTMapping) (kubectl.Reaper, error)
 }
 
 type factory struct {
@@ -225,10 +225,9 @@ type factory struct {
 }
 
 // NewFactory creates a factory with the default Kubernetes resources defined
-// if optionalClientConfig is nil, then flags will be bound to a new clientcmd.ClientConfig.
-// if optionalClientConfig is not nil, then this factory will make use of it.
-func NewFactory(optionalClientConfig clientcmd.ClientConfig) Factory {
-	clientAccessFactory := NewClientAccessFactory(optionalClientConfig)
+// Receives a clientGetter capable of providing a discovery client and a REST client configuration.
+func NewFactory(clientGetter RESTClientGetter) Factory {
+	clientAccessFactory := NewClientAccessFactory(clientGetter)
 	objectMappingFactory := NewObjectMappingFactory(clientAccessFactory)
 	builderFactory := NewBuilderFactory(clientAccessFactory, objectMappingFactory)
 

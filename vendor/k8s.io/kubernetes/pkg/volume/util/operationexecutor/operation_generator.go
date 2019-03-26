@@ -547,12 +547,10 @@ func (og *operationGenerator) GenerateMountVolumeFunc(
 			return volumeToMount.GenerateError("MountVolume.SetUp failed", mountErr)
 		}
 
-		simpleMsg, detailedMsg := volumeToMount.GenerateMsg("MountVolume.SetUp succeeded", "")
+		_, detailedMsg := volumeToMount.GenerateMsg("MountVolume.SetUp succeeded", "")
 		verbosity := glog.Level(1)
 		if isRemount {
 			verbosity = glog.Level(4)
-		} else {
-			og.recorder.Eventf(volumeToMount.Pod, v1.EventTypeNormal, kevents.SuccessfulMountVolume, simpleMsg)
 		}
 		glog.V(verbosity).Infof(detailedMsg)
 
@@ -564,7 +562,8 @@ func (og *operationGenerator) GenerateMountVolumeFunc(
 			volumeMounter,
 			nil,
 			volumeToMount.OuterVolumeSpecName,
-			volumeToMount.VolumeGidValue)
+			volumeToMount.VolumeGidValue,
+			volumeToMount.VolumeSpec)
 		if markVolMountedErr != nil {
 			// On failure, return error. Caller will log and retry.
 			return volumeToMount.GenerateError("MountVolume.MarkVolumeAsMounted failed", markVolMountedErr)
@@ -913,7 +912,8 @@ func (og *operationGenerator) GenerateMapVolumeFunc(
 			nil,
 			blockVolumeMapper,
 			volumeToMount.OuterVolumeSpecName,
-			volumeToMount.VolumeGidValue)
+			volumeToMount.VolumeGidValue,
+			volumeToMount.VolumeSpec)
 		if markVolMountedErr != nil {
 			// On failure, return error. Caller will log and retry.
 			return volumeToMount.GenerateError("MapVolume.MarkVolumeAsMounted failed", markVolMountedErr)

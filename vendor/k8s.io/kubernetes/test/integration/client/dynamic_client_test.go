@@ -24,6 +24,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/dynamic"
 	clientset "k8s.io/client-go/kubernetes"
 	restclient "k8s.io/client-go/rest"
@@ -38,14 +39,14 @@ func TestDynamicClient(t *testing.T) {
 	ns := framework.CreateTestingNamespace("dynamic-client", s, t)
 	defer framework.DeleteTestingNamespace(ns, s, t)
 
-	gv := testapi.Groups[v1.GroupName].GroupVersion()
+	gv := &schema.GroupVersion{Group: "", Version: "v1"}
 	config := &restclient.Config{
 		Host:          s.URL,
 		ContentConfig: restclient.ContentConfig{GroupVersion: gv},
 	}
 
 	client := clientset.NewForConfigOrDie(config)
-	dynamicClient, err := dynamic.NewClient(config)
+	dynamicClient, err := dynamic.NewClient(config, *gv)
 	_ = dynamicClient
 	if err != nil {
 		t.Fatalf("unexpected error creating dynamic client: %v", err)
