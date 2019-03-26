@@ -1,5 +1,5 @@
-hash: 41dbfa7d859f3b290459a2b5f9cf47b06f310d23bd36c922c10938bb4a3693ce
-updated: 2018-05-08T16:56:54.627532402-07:00
+hash: d1c7c7cbf6f4e1fae436bee330fac32629321ab6da220d74669e310f908cda74
+updated: 2019-03-26T13:56:20.062889719+01:00
 imports:
 - name: cloud.google.com/go
   version: e9284bade4f43071dac5ec56c73a03a3c9fa7772
@@ -206,7 +206,6 @@ imports:
   - core/v1
   - events/v1beta1
   - extensions/v1beta1
-  - imagepolicy/v1alpha1
   - networking/v1
   - policy/v1beta1
   - rbac/v1
@@ -223,7 +222,6 @@ imports:
   - pkg/api/errors
   - pkg/api/meta
   - pkg/api/resource
-  - pkg/api/resource
   - pkg/apis/meta/v1
   - pkg/apis/meta/v1/unstructured
   - pkg/apis/meta/v1beta1
@@ -232,8 +230,6 @@ imports:
   - pkg/fields
   - pkg/labels
   - pkg/runtime
-  - pkg/runtime
-  - pkg/runtime/schema
   - pkg/runtime/schema
   - pkg/runtime/serializer
   - pkg/runtime/serializer/json
@@ -243,11 +239,9 @@ imports:
   - pkg/runtime/serializer/versioning
   - pkg/selection
   - pkg/types
-  - pkg/types
   - pkg/util/clock
   - pkg/util/errors
   - pkg/util/framer
-  - pkg/util/intstr
   - pkg/util/intstr
   - pkg/util/json
   - pkg/util/net
@@ -299,6 +293,7 @@ imports:
   - pkg/version
   - plugin/pkg/client/auth/exec
   - plugin/pkg/client/auth/gcp
+  - plugin/pkg/client/auth/oidc
   - rest
   - rest/watch
   - third_party/forked/golang/template
@@ -315,8 +310,4 @@ imports:
   - util/homedir
   - util/integer
   - util/jsonpath
-- name: k8s.io/kubernetes
-  version: a743392937c022a87831227ef152471359fd8d9e
-  subpackages:
-  - pkg/api/v1/resource
 testImports: []
