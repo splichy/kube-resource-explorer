@@ -4,7 +4,7 @@ jobs:
     docker:
       - image: circleci/golang:1.9
       
-    working_directory: /go/src/github.com/dpetzold/kube-resource-explorer
+    working_directory: /go/src/github.com/splichy/kube-resource-explorer
     steps:
       - checkout
       - run: make build

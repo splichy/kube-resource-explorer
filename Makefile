@@ -12,8 +12,8 @@ vendor:
 
 
 docker-build:
-	docker build --rm -t dpetzold/kube-resource-explorer .
-	docker push dpetzold/kube-resource-explorer
+	docker build --rm -t splichy/kube-resource-explorer .
+	docker push splichy/kube-resource-explorer
 
 
 run:
@@ -21,4 +21,4 @@ run:
 		-v${HOME}/.kube:/.kube \
 		-v${HOME}/.config/gcloud:/.config/gcloud \
 		-v/etc/ssl/certs:/etc/ssl/certs \
-		dpetzold/kube-resource-explorer
+		splichy/kube-resource-explorer
